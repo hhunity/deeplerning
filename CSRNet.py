@@ -16,6 +16,12 @@
 #カウント数 = 密度マップの全ピクセルの合計値
 
 # csrnet_count.py
+#https://github.com/leeyeehoo/CSRNet-pytorch
+## partB をダウンロードして実行
+#python csrnet_count.py 入力画像.jpg --weights partB_pre.pth
+
+
+
 
 # PyTorchを使ったCSRNetによる物体カウント
 
