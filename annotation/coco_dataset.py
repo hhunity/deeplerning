@@ -13,6 +13,35 @@ import torchvision.transforms.functional as TF
 import random
 
 
+def pad_to_square(img, mask=None, fill=0):
+    """
+    画像（とマスク）を正方形にパディングする
+    長辺に合わせて短辺に黒帯を追加する（中央寄せ）
+
+    Args:
+        img  : PIL Image
+        mask : PIL Image or None
+        fill : パディングの値（画像は0=黒、マスクは0=背景）
+
+    Returns:
+        img_padded, mask_padded（maskがNoneならNone）
+    """
+    w, h   = img.size
+    max_wh = max(w, h)
+    pad_w  = max_wh - w
+    pad_h  = max_wh - h
+    # 左右・上下に均等にパディング（余りは右・下に追加）
+    left   = pad_w // 2
+    right  = pad_w - left
+    top    = pad_h // 2
+    bottom = pad_h - top
+    padding = (left, top, right, bottom)
+
+    img_padded  = TF.pad(img,  padding, fill=fill)
+    mask_padded = TF.pad(mask, padding, fill=0) if mask is not None else None
+    return img_padded, mask_padded
+
+
 def load_coco(json_path):
     """COCO JSONを読み込んでimage_id→annotationsのマップを返す"""
     with open(json_path) as f:
@@ -207,6 +236,8 @@ class UNetCOCODataset(Dataset):
         img  = Image.open(s['img']).convert('RGB')
         mask = Image.open(s['mask']).convert('L')
 
+        # 縦横比を保つためにパディングしてから正方形にリサイズ
+        img, mask = pad_to_square(img, mask)
         img  = img.resize((self.img_size, self.img_size), Image.BILINEAR)
         mask = mask.resize((self.img_size, self.img_size), Image.NEAREST)
 
