@@ -277,7 +277,7 @@ def main():
     t = sub.add_parser('train')
     t.add_argument('--images',       required=True)
     t.add_argument('--masks',        required=True, help='マスクPNGディレクトリ')
-    t.add_argument('--json',         required=True, help='COCO形式アノテーションJSON')
+    t.add_argument('--json',         default=None,  help='COCO形式JSON（省略可）')
     t.add_argument('--output-dir',   default='checkpoints_unet')
     t.add_argument('--epochs',       type=int,   default=100)
     t.add_argument('--batch-size',   type=int,   default=4)
