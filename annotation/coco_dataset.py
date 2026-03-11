@@ -3,6 +3,7 @@
 # CSRNet・Faster R-CNN・UNet で共通して使用する
 
 import os
+import glob
 import json
 import numpy as np
 from PIL import Image
@@ -208,27 +209,36 @@ class FasterRCNNCOCODataset(Dataset):
 
 class UNetCOCODataset(Dataset):
     """
-    COCOフォーマット対応 UNet データセット
-    セグメンテーションマスク（PNG）をCOCO JSONから参照する
-    マスクファイルはmasks_dirに画像と同名で格納
+    UNet データセット
+    imagesフォルダとmasksフォルダを直接スキャンして使う
+    対応するマスクPNGがある画像だけ学習に使用
+    json_pathは不要（省略可能・指定しても無視）
     """
 
-    def __init__(self, images_dir, masks_dir, json_path, img_size=512, augment=True):
+    def __init__(self, images_dir, masks_dir, json_path=None, img_size=512, augment=True):
         self.images_dir = images_dir
         self.masks_dir  = masks_dir
         self.img_size   = img_size
         self.augment    = augment
 
-        coco, id_to_image, _ = load_coco(json_path)
+        # imagesフォルダを直接スキャン
+        exts = ('*.jpg', '*.jpeg', '*.png', '*.bmp')
         self.samples = []
-        for img_info in coco['images']:
-            img_path  = os.path.join(images_dir, img_info['file_name'])
-            stem      = os.path.splitext(img_info['file_name'])[0]
-            mask_path = os.path.join(masks_dir, stem + '.png')
-            if os.path.isfile(img_path) and os.path.isfile(mask_path):
-                self.samples.append({'img': img_path, 'mask': mask_path})
+        for ext in exts:
+            for img_path in sorted(glob.glob(os.path.join(images_dir, ext))):
+                stem      = os.path.splitext(os.path.basename(img_path))[0]
+                mask_path = os.path.join(masks_dir, stem + '.png')
+                if os.path.isfile(mask_path):
+                    self.samples.append({'img': img_path, 'mask': mask_path})
 
-    def __len__(self):
+        if not self.samples:
+            raise RuntimeError(
+                f"学習データが見つかりません\n"
+                f"  画像: {images_dir}\n"
+                f"  マスク: {masks_dir}\n"
+                f"  マスクと同名のPNGファイルが必要です"
+            )
+        print(f"[INFO] データセット: {len(self.samples)} 枚")
         return len(self.samples)
 
     def __getitem__(self, idx):
