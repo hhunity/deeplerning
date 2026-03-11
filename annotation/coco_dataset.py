@@ -239,6 +239,8 @@ class UNetCOCODataset(Dataset):
                 f"  マスクと同名のPNGファイルが必要です"
             )
         print(f"[INFO] データセット: {len(self.samples)} 枚")
+
+    def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
