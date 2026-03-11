@@ -216,12 +216,22 @@ def predict(args):
     model.load_state_dict(ckpt['state_dict'] if 'state_dict' in ckpt else ckpt)
     model.eval()
 
-    img_pil   = Image.open(args.image).convert('RGB' if args.in_channels == 3 else 'L')
+    img_pil        = Image.open(args.image).convert('RGB' if args.in_channels == 3 else 'L')
     orig_w, orig_h = img_pil.size
-    img_r     = img_pil.resize((args.img_size, args.img_size), Image.BILINEAR)
-    t         = TF.to_tensor(img_r)
+
+    # 学習時と同じ処理: パディング → 正方形 → リサイズ
+    max_wh   = max(orig_w, orig_h)
+    pad_w    = max_wh - orig_w
+    pad_h    = max_wh - orig_h
+    pad_left = pad_w // 2
+    pad_top  = pad_h // 2
+    img_padded = TF.pad(img_pil,
+                        (pad_left, pad_top, pad_w - pad_left, pad_h - pad_top),
+                        fill=0)
+    img_r = img_padded.resize((args.img_size, args.img_size), Image.BILINEAR)
+    t     = TF.to_tensor(img_r)
     if args.in_channels == 3:
-        t = TF.normalize(t, [0.485,0.456,0.406], [0.229,0.224,0.225])
+        t = TF.normalize(t, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     t = t.unsqueeze(0).to(device)
 
     with torch.no_grad():
@@ -231,8 +241,15 @@ def predict(args):
     count, labeled, boxes = count_objects(mask, args.min_size)
     print(f"\n{'='*40}\n  カウント数: {count}\n{'='*40}\n")
 
-    sx, sy = orig_w / args.img_size, orig_h / args.img_size
-    boxes_orig = [(int(x1*sx), int(y1*sy), int(x2*sx), int(y2*sy)) for x1,y1,x2,y2 in boxes]
+    # パディング込みのスケールで元画像座標に戻す
+    scale      = max_wh / args.img_size
+    boxes_orig = [
+        (max(0, int(x1*scale) - pad_left),
+         max(0, int(y1*scale) - pad_top),
+         min(orig_w, int(x2*scale) - pad_left),
+         min(orig_h, int(y2*scale) - pad_top))
+        for x1, y1, x2, y2 in boxes
+    ]
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     axes[0].imshow(img_pil, cmap='gray' if args.in_channels == 1 else None)
