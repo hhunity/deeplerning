@@ -160,9 +160,21 @@ def predict(args):
     with torch.no_grad():
         output = model(img_tensor)[0]
 
-    keep   = output['scores'] >= args.score_thresh
-    boxes  = output['boxes'][keep].cpu().numpy()
-    scores = output['scores'][keep].cpu().numpy()
+    from torchvision.ops import nms as torchvision_nms
+
+    # score_threshで低スコアを除外
+    keep     = output['scores'] >= args.score_thresh
+    boxes_t  = output['boxes'][keep]
+    scores_t = output['scores'][keep]
+
+    # NMSで重複ボックスを除外
+    if len(boxes_t) > 0:
+        nms_keep = torchvision_nms(boxes_t, scores_t, iou_threshold=args.nms_thresh)
+        boxes_t  = boxes_t[nms_keep]
+        scores_t = scores_t[nms_keep]
+
+    boxes  = boxes_t.cpu().numpy()
+    scores = scores_t.cpu().numpy()
     count  = len(boxes)
 
     print(f"\n{'='*40}\n  検出数: {count}\n{'='*40}\n")
@@ -203,7 +215,10 @@ def main():
     p = sub.add_parser('predict')
     p.add_argument('image')
     p.add_argument('--weights',      default=None)
-    p.add_argument('--score-thresh', type=float, default=0.5)
+    p.add_argument('--score-thresh', type=float, default=0.5,
+                   help='このスコア以下のボックスを除外 (default: 0.5)')
+    p.add_argument('--nms-thresh',   type=float, default=0.3,
+                   help='NMSのIoU閾値 小さいほど重複が減る (default: 0.3)')
     p.add_argument('--output',       default='result.png')
     p.add_argument('--cpu',          action='store_true')
 
