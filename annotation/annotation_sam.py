@@ -41,7 +41,7 @@ MODEL_CONFIG_MAP = {
 }
 
 
-def load_sam2(checkpoint, model_type, device):
+def load_sam2(checkpoint, model_type, device, points_per_side=32):
     try:
         from sam2.build_sam import build_sam2
         from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
@@ -60,9 +60,10 @@ def load_sam2(checkpoint, model_type, device):
     sam2   = build_sam2(config, checkpoint, device=device)
     sam2.eval()
 
+    print(f'[INFO] points_per_side: {points_per_side}')
     mask_generator = SAM2AutomaticMaskGenerator(
         model                  = sam2,
-        points_per_side        = 32,
+        points_per_side        = points_per_side,
         pred_iou_thresh        = 0.88,
         stability_score_thresh = 0.95,
         min_mask_region_area   = 50,
@@ -106,7 +107,8 @@ def masks_to_binary(masks, selected, h, w):
 
 
 def annotate_images(images_dir, output_dir, checkpoint, model_type, device,
-                    min_area_ratio, max_area_ratio, min_ratio, max_ratio):
+                    min_area_ratio, max_area_ratio, min_ratio, max_ratio,
+                    upscale, points_per_side):
     os.makedirs(output_dir, exist_ok=True)
 
     exts = ('*.jpg', '*.jpeg', '*.png', '*.bmp')
@@ -121,7 +123,8 @@ def annotate_images(images_dir, output_dir, checkpoint, model_type, device,
     print("操作: 左クリック=選択(緑) / 右クリック=除外 / S=保存 / R=再実行 / Q=終了")
 
     # SAM2読み込み
-    mask_generator = load_sam2(checkpoint, model_type, device)
+    mask_generator = load_sam2(checkpoint, model_type, device,
+                                points_per_side=points_per_side)
 
     idx = 0
     while idx < len(image_paths):
@@ -129,10 +132,30 @@ def annotate_images(images_dir, output_dir, checkpoint, model_type, device,
         stem     = os.path.splitext(os.path.basename(img_path))[0]
         out_path = os.path.join(output_dir, stem + '.png')
 
-        img_pil = Image.open(img_path).convert('RGB')
-        img_np  = np.array(img_pil)
-        h, w    = img_np.shape[:2]
-        image_area = h * w
+        img_pil  = Image.open(img_path).convert('RGB')
+        orig_w, orig_h = img_pil.size
+
+        # アップスケール（SAM2に渡す前に拡大・縦横比を保って正方形パディング）
+        if upscale > 0:
+            max_wh   = max(orig_w, orig_h)
+            pad_w    = max_wh - orig_w
+            pad_h    = max_wh - orig_h
+            pad_left = pad_w // 2
+            pad_top  = pad_h // 2
+            from torchvision.transforms import functional as TVF
+            img_sq   = TVF.pad(img_pil,
+                               (pad_left, pad_top, pad_w-pad_left, pad_h-pad_top),
+                               fill=0)
+            img_sam  = img_sq.resize((upscale, upscale), Image.BILINEAR)
+            print(f'[INFO] {orig_w}×{orig_h} → パディング → {upscale}×{upscale} にアップスケール')
+        else:
+            img_sam  = img_pil
+            pad_left = pad_top = 0
+            max_wh   = max(orig_w, orig_h)
+
+        img_np     = np.array(img_sam)
+        sam_h, sam_w = img_np.shape[:2]
+        image_area = sam_h * sam_w
 
         print(f"\n[{idx+1}/{len(image_paths)}] {stem}")
 
@@ -201,7 +224,7 @@ def annotate_images(images_dir, output_dir, checkpoint, model_type, device,
         def find_mask_at(x, y):
             """クリック座標に対応するマスクを探す（面積が小さい順に優先）"""
             xi, yi = int(round(x)), int(round(y))
-            if xi < 0 or xi >= w or yi < 0 or yi >= h:
+            if xi < 0 or xi >= sam_w or yi < 0 or yi >= sam_h:
                 return None
             candidates = [
                 (m['area'], i) for i, m in enumerate(masks)
@@ -226,11 +249,27 @@ def annotate_images(images_dir, output_dir, checkpoint, model_type, device,
 
         def on_key(event):
             if event.key == 's':
-                # 選択済みマスクを合成して保存
+                # 選択済みマスクをSAMサイズで合成
                 masks_dict = {i: m for i, m in enumerate(masks)}
-                binary = masks_to_binary(masks_dict, selected, h, w)
+                binary_sam = masks_to_binary(masks_dict, selected, sam_h, sam_w)
+
+                # アップスケールしていた場合は元のサイズに戻す
+                if upscale > 0:
+                    # パディングを除いて元のサイズにリサイズ
+                    scale     = upscale / max_wh
+                    crop_left = int(pad_left * scale)
+                    crop_top  = int(pad_top  * scale)
+                    crop_right  = crop_left + int(orig_w * scale)
+                    crop_bottom = crop_top  + int(orig_h * scale)
+                    binary_cropped = binary_sam[crop_top:crop_bottom, crop_left:crop_right]
+                    binary = np.array(
+                        Image.fromarray(binary_cropped).resize((orig_w, orig_h), Image.NEAREST)
+                    )
+                else:
+                    binary = binary_sam
+
                 Image.fromarray(binary).save(out_path)
-                print(f'  保存: {out_path}  ({len(selected)} マスク)')
+                print(f'  保存: {out_path}  ({len(selected)} マスク)  サイズ: {orig_w}×{orig_h}')
                 saved['done'] = True
                 plt.close(fig)
             elif event.key == 'q':
@@ -267,15 +306,19 @@ def main():
     parser.add_argument('--checkpoint',  required=True,  help='SAM2チェックポイント (.pt)')
     parser.add_argument('--model-type',  default='small',
                         choices=['tiny', 'small', 'base_plus', 'large'])
-    parser.add_argument('--min-area',    type=float, default=0.001,
+    parser.add_argument('--min-area',       type=float, default=0.001,
                         help='最小面積フィルタ（画像面積の割合 default: 0.001）')
-    parser.add_argument('--max-area',    type=float, default=0.3,
+    parser.add_argument('--max-area',       type=float, default=0.3,
                         help='最大面積フィルタ（画像面積の割合 default: 0.3）')
-    parser.add_argument('--min-ratio',   type=float, default=2.0,
+    parser.add_argument('--min-ratio',      type=float, default=2.0,
                         help='縦横比の最小値（細長さ下限 default: 2.0）')
-    parser.add_argument('--max-ratio',   type=float, default=20.0,
+    parser.add_argument('--max-ratio',      type=float, default=20.0,
                         help='縦横比の最大値（細長さ上限 default: 20.0）')
-    parser.add_argument('--cpu',         action='store_true')
+    parser.add_argument('--upscale',        type=int,   default=1024,
+                        help='SAM2に渡す前に拡大するサイズ 0で無効 (default: 1024)')
+    parser.add_argument('--points-per-side',type=int,   default=64,
+                        help='SAM2のグリッド密度 大きいほど細かく検出 (default: 64)')
+    parser.add_argument('--cpu',            action='store_true')
     args = parser.parse_args()
 
     if args.cpu:
@@ -289,15 +332,17 @@ def main():
     print(f'[INFO] デバイス: {device}')
 
     annotate_images(
-        images_dir     = args.images,
-        output_dir     = args.output,
-        checkpoint     = args.checkpoint,
-        model_type     = args.model_type,
-        device         = device,
-        min_area_ratio = args.min_area,
-        max_area_ratio = args.max_area,
-        min_ratio      = args.min_ratio,
-        max_ratio      = args.max_ratio,
+        images_dir      = args.images,
+        output_dir      = args.output,
+        checkpoint      = args.checkpoint,
+        model_type      = args.model_type,
+        device          = device,
+        min_area_ratio  = args.min_area,
+        max_area_ratio  = args.max_area,
+        min_ratio       = args.min_ratio,
+        max_ratio       = args.max_ratio,
+        upscale         = args.upscale,
+        points_per_side = args.points_per_side,
     )
 
 
