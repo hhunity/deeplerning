@@ -146,12 +146,13 @@ def register_cavities(img_path, config_path, margin):
 
 # ==================== 切り出し ====================
 
-def crop_images(images_dir, config_path, output_dir, label_mode):
+def crop_images(images_dir, config_path, output_dir, label_mode, crop_size=None):
     """
     登録済みの窪み位置を使って全画像から切り出す
 
     label_mode='manual' : ラベルを手動で入力（分類学習用）
     label_mode='auto'   : ラベルなし（推論用）
+    crop_size=(w, h)    : 指定サイズにリサイズして保存（Noneなら切り出したまま）
     """
     if not os.path.isfile(config_path):
         print(f"[ERROR] configが見つかりません: {config_path}")
@@ -163,7 +164,8 @@ def crop_images(images_dir, config_path, output_dir, label_mode):
 
     cavities = config['cavities']
     margin   = config.get('margin', 10)
-    print(f"[INFO] 窪み数: {len(cavities)}  マージン: {margin}px")
+    size_str = f'{crop_size[0]}×{crop_size[1]}px' if crop_size else 'そのまま'
+    print(f"[INFO] 窪み数: {len(cavities)}  マージン: {margin}px  出力サイズ: {size_str}")
 
     exts = ('*.jpg', '*.jpeg', '*.png', '*.bmp')
     image_paths = sorted(
@@ -182,23 +184,18 @@ def crop_images(images_dir, config_path, output_dir, label_mode):
         iw, ih  = img_pil.size
 
         for cavity in cavities:
-            cid = cavity['id']
-            x1  = max(0,  cavity['x1'] - margin)
-            y1  = max(0,  cavity['y1'] - margin)
-            x2  = min(iw, cavity['x2'] + margin)
-            y2  = min(ih, cavity['y2'] + margin)
-
+            cid  = cavity['id']
+            x1   = max(0,  cavity['x1'] - margin)
+            y1   = max(0,  cavity['y1'] - margin)
+            x2   = min(iw, cavity['x2'] + margin)
+            y2   = min(ih, cavity['y2'] + margin)
             crop = img_pil.crop((x1, y1, x2, y2))
 
-            if label_mode == 'manual':
-                # ラベル別フォルダに保存
-                # ファイル名: {stem}_cavity{id}.jpg
-                # → 後でフォルダに振り分ける
-                save_dir  = output_dir
-                save_path = os.path.join(save_dir, f'{stem}_c{cid:02d}.jpg')
-            else:
-                save_path = os.path.join(output_dir, f'{stem}_c{cid:02d}.jpg')
+            # サイズ指定があればリサイズ
+            if crop_size:
+                crop = crop.resize(crop_size, Image.BILINEAR)
 
+            save_path = os.path.join(output_dir, f'{stem}_c{cid:02d}.jpg')
             crop.save(save_path)
             total += 1
 
@@ -217,13 +214,14 @@ def crop_images(images_dir, config_path, output_dir, label_mode):
 
 # ==================== 推論用切り出し ====================
 
-def crop_for_predict(img_path, config_path, output_dir, margin_override=None):
+def crop_for_predict(img_path, config_path, output_dir, margin_override=None, crop_size=None):
     """推論時に窪みを切り出す（ラベルなし）"""
     with open(config_path) as f:
         config = json.load(f)
 
-    cavities = config['cavities']
-    margin   = margin_override if margin_override is not None else config.get('margin', 10)
+    cavities  = config['cavities']
+    margin    = margin_override if margin_override is not None else config.get('margin', 10)
+    crop_size = crop_size or config.get('crop_size')  # configに保存されていれば使う
 
     img_pil = Image.open(img_path).convert('RGB')
     iw, ih  = img_pil.size
@@ -237,6 +235,8 @@ def crop_for_predict(img_path, config_path, output_dir, margin_override=None):
         x2   = min(iw, cavity['x2'] + margin)
         y2   = min(ih, cavity['y2'] + margin)
         crop = img_pil.crop((x1, y1, x2, y2))
+        if crop_size:
+            crop = crop.resize(crop_size, Image.BILINEAR)
         path = os.path.join(output_dir, f'cavity_{cid:02d}.jpg')
         crop.save(path)
         crops.append({'id': cid, 'path': path, 'bbox': (x1, y1, x2, y2)})
@@ -259,18 +259,30 @@ def main():
 
     # crop
     c = sub.add_parser('crop', help='全画像から窪みを切り出す')
-    c.add_argument('images',   help='画像ディレクトリ')
-    c.add_argument('--config', default='cavities.json')
-    c.add_argument('--output', default='crops', help='切り出し先ディレクトリ')
-    c.add_argument('--mode',   default='manual', choices=['manual', 'auto'],
+    c.add_argument('images',      help='画像ディレクトリ')
+    c.add_argument('--config',    default='cavities.json')
+    c.add_argument('--output',    default='crops', help='切り出し先ディレクトリ')
+    c.add_argument('--mode',      default='manual', choices=['manual', 'auto'],
                    help='manual=ラベル振り分け用  auto=推論用')
+    c.add_argument('--crop-size', default=None,
+                   help='出力サイズ 幅x高さ（例: 128x128）省略時はそのまま')
 
     args = parser.parse_args()
 
     if args.mode == 'register':
         register_cavities(args.image, args.config, args.margin)
     elif args.mode == 'crop':
-        crop_images(args.images, args.config, args.output, args.mode)
+        # --crop-size のパース
+        crop_size = None
+        if args.crop_size:
+            try:
+                cw, ch    = args.crop_size.lower().split('x')
+                crop_size = (int(cw), int(ch))
+            except:
+                print(f"[ERROR] --crop-size の形式が正しくありません: {args.crop_size}")
+                print("        例: --crop-size 128x128")
+                sys.exit(1)
+        crop_images(args.images, args.config, args.output, args.mode, crop_size)
 
 
 if __name__ == '__main__':
