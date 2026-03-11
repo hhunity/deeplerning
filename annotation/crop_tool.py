@@ -24,10 +24,11 @@ from PIL import Image
 
 # ==================== 位置登録 ====================
 
-def register_cavities(img_path, config_path, margin):
+def register_cavities(img_path, config_path, margin, fixed_size=None):
     """
-    画像上でドラッグして窪みの位置を登録する
-    既存のconfigがあれば読み込んで追記できる
+    画像上で窪みの位置を登録する
+    fixed_size=(w,h): クリックした場所を中心に固定サイズで配置
+    fixed_size=None : ドラッグで自由に範囲指定
     """
     img_pil = Image.open(img_path).convert('RGB')
     img_np  = np.array(img_pil)
@@ -42,14 +43,17 @@ def register_cavities(img_path, config_path, margin):
     else:
         cavities = []
 
-    state = {'x0': None, 'y0': None, 'cur_rect': None}
+    if fixed_size:
+        print(f"[INFO] 固定サイズモード: {fixed_size[0]}×{fixed_size[1]}px  左クリック=配置")
+    else:
+        print(f"[INFO] 自由モード: ドラッグで範囲指定")
+
+    state = {'x0': None, 'y0': None, 'cur_rect': None, 'preview': None}
     saved = {'done': False}
 
     fig, ax = plt.subplots(figsize=(14, 9))
-    fig.canvas.manager.set_window_title('窪み位置登録  ドラッグ=範囲指定  S=保存  Z=削除  Q=終了')
+    fig.canvas.manager.set_window_title('窪み位置登録  S=保存  Z=削除  Q=終了')
     ax.imshow(img_np)
-    ax.set_title(f'窪み数: {len(cavities)}  |  ドラッグ=範囲指定  S=保存  Z=最後を削除  Q=終了',
-                 fontsize=11)
     ax.axis('off')
 
     rect_patches = []
@@ -66,61 +70,96 @@ def register_cavities(img_path, config_path, margin):
     plt.tight_layout()
 
     def update_title():
-        ax.set_title(f'窪み数: {len(cavities)}  |  ドラッグ=範囲指定  S=保存  Z=最後を削除',
-                     fontsize=11)
+        if fixed_size:
+            hint = f'左クリック=配置（{fixed_size[0]}×{fixed_size[1]}px）  Z=最後を削除  S=保存  Q=終了'
+        else:
+            hint = 'ドラッグ=範囲指定  Z=最後を削除  S=保存  Q=終了'
+        ax.set_title(f'窪み数: {len(cavities)}  |  {hint}', fontsize=11)
         fig.canvas.draw_idle()
+
+    update_title()
+
+    def add_cavity(x1, y1, x2, y2):
+        cavities.append({
+            'x1': int(x1), 'y1': int(y1),
+            'x2': int(x2), 'y2': int(y2),
+            'id': len(cavities) + 1
+        })
+        r = mpatches.Rectangle((x1, y1), x2-x1, y2-y1,
+                                linewidth=2, edgecolor='lime', facecolor='none')
+        ax.add_patch(r)
+        ax.text(x1+2, y1+12, str(len(cavities)), color='lime', fontsize=8, fontweight='bold')
+        rect_patches.append(r)
+        update_title()
+
+    # 固定サイズモード: マウス移動でプレビュー表示
+    def on_motion(event):
+        if event.inaxes != ax:
+            return
+        if fixed_size:
+            # プレビュー枠を更新
+            hw, hh = fixed_size[0] / 2, fixed_size[1] / 2
+            px, py = event.xdata - hw, event.ydata - hh
+            if state['preview'] is None:
+                r = mpatches.Rectangle((px, py), fixed_size[0], fixed_size[1],
+                                       linewidth=1, edgecolor='yellow',
+                                       facecolor='none', linestyle='--')
+                ax.add_patch(r)
+                state['preview'] = r
+            else:
+                state['preview'].set_xy((px, py))
+            fig.canvas.draw_idle()
+        else:
+            # ドラッグ中の枠を更新
+            if state['x0'] is None or state['cur_rect'] is None:
+                return
+            x0, y0 = state['x0'], state['y0']
+            state['cur_rect'].set_xy((min(x0, event.xdata), min(y0, event.ydata)))
+            state['cur_rect'].set_width(abs(event.xdata - x0))
+            state['cur_rect'].set_height(abs(event.ydata - y0))
+            fig.canvas.draw_idle()
 
     def on_press(event):
         if event.inaxes != ax or event.button != 1:
             return
-        state['x0'], state['y0'] = event.xdata, event.ydata
-        r = mpatches.Rectangle((event.xdata, event.ydata), 0, 0,
-                                linewidth=2, edgecolor='yellow',
-                                facecolor='none', linestyle='--')
-        ax.add_patch(r)
-        state['cur_rect'] = r
-        fig.canvas.draw_idle()
+        if fixed_size:
+            # クリック位置を中心に固定サイズで配置
+            hw, hh = fixed_size[0] / 2, fixed_size[1] / 2
+            x1 = max(0, event.xdata - hw)
+            y1 = max(0, event.ydata - hh)
+            x2 = min(w, event.xdata + hw)
+            y2 = min(h, event.ydata + hh)
+            add_cavity(x1, y1, x2, y2)
+        else:
+            # ドラッグ開始
+            state['x0'], state['y0'] = event.xdata, event.ydata
+            r = mpatches.Rectangle((event.xdata, event.ydata), 0, 0,
+                                    linewidth=2, edgecolor='yellow',
+                                    facecolor='none', linestyle='--')
+            ax.add_patch(r)
+            state['cur_rect'] = r
+            fig.canvas.draw_idle()
 
-    def on_motion(event):
-        if event.inaxes != ax or state['x0'] is None:
+    def on_release(event):
+        if fixed_size or event.button != 1 or state['x0'] is None:
             return
         r = state['cur_rect']
         if r is None:
             return
         x0, y0 = state['x0'], state['y0']
-        r.set_xy((min(x0, event.xdata), min(y0, event.ydata)))
-        r.set_width(abs(event.xdata - x0))
-        r.set_height(abs(event.ydata - y0))
-        fig.canvas.draw_idle()
-
-    def on_release(event):
-        if event.button != 1 or state['x0'] is None:
-            return
-        r = state['cur_rect']
-        if r is None:
-            return
-        x0, y0   = state['x0'], state['y0']
-        x1, y1   = min(x0, event.xdata), min(y0, event.ydata)
-        x2, y2   = max(x0, event.xdata), max(y0, event.ydata)
+        x1, y1 = min(x0, event.xdata), min(y0, event.ydata)
+        x2, y2 = max(x0, event.xdata), max(y0, event.ydata)
+        r.remove()
         if abs(x2-x1) > 5 and abs(y2-y1) > 5:
-            cavities.append({'x1': int(x1), 'y1': int(y1),
-                             'x2': int(x2), 'y2': int(y2),
-                             'id': len(cavities) + 1})
-            r.set_edgecolor('lime')
-            r.set_linestyle('-')
-            ax.text(x1+2, y1+12, str(len(cavities)), color='lime',
-                    fontsize=8, fontweight='bold')
-            rect_patches.append(r)
-        else:
-            r.remove()
+            add_cavity(x1, y1, x2, y2)
         state['x0'] = state['y0'] = state['cur_rect'] = None
-        update_title()
 
     def on_key(event):
         if event.key == 's':
             config = {
                 'image_size' : [w, h],
                 'margin'     : margin,
+                'fixed_size' : list(fixed_size) if fixed_size else None,
                 'cavities'   : cavities,
             }
             with open(config_path, 'w') as f:
@@ -252,10 +291,14 @@ def main():
 
     # register
     r = sub.add_parser('register', help='窪みの位置を登録')
-    r.add_argument('image',    help='基準画像パス')
-    r.add_argument('--config', default='cavities.json', help='設定ファイル保存先')
-    r.add_argument('--margin', type=int, default=10,
+    r.add_argument('image',        help='基準画像パス')
+    r.add_argument('--config',     default='cavities.json', help='設定ファイル保存先')
+    r.add_argument('--margin',     type=int, default=10,
                    help='切り出し時のマージン（px default:10）')
+    r.add_argument('--fixed-size', default=None,
+                   help='固定サイズ指定 幅x高さ（例: 80x80）\n'
+                        '指定時: クリックで配置\n'
+                        '省略時: ドラッグで自由に指定')
 
     # crop
     c = sub.add_parser('crop', help='全画像から窪みを切り出す')
@@ -270,7 +313,16 @@ def main():
     args = parser.parse_args()
 
     if args.mode == 'register':
-        register_cavities(args.image, args.config, args.margin)
+        fixed_size = None
+        if args.fixed_size:
+            try:
+                fw, fh     = args.fixed_size.lower().split('x')
+                fixed_size = (int(fw), int(fh))
+            except:
+                print(f"[ERROR] --fixed-size の形式が正しくありません: {args.fixed_size}")
+                print("        例: --fixed-size 80x80")
+                sys.exit(1)
+        register_cavities(args.image, args.config, args.margin, fixed_size)
     elif args.mode == 'crop':
         # --crop-size のパース
         crop_size = None
