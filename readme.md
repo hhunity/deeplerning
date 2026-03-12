@@ -1,3 +1,50 @@
+from sklearn.metrics import confusion_matrix
+import itertools
+
+def plot_confusion_matrix(cm, classes, save_path):
+    fig, ax = plt.subplots(figsize=(len(classes)*2, len(classes)*2))
+    im = ax.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.colorbar(im, ax=ax)
+    ax.set_xticks(range(len(classes)))
+    ax.set_yticks(range(len(classes)))
+    ax.set_xticklabels(classes, fontsize=11)
+    ax.set_yticklabels(classes, fontsize=11)
+    ax.set_xlabel('予測', fontsize=12)
+    ax.set_ylabel('正解', fontsize=12)
+    ax.set_title('混同行列', fontsize=13)
+
+    # 各セルに数値を表示
+    thresh = cm.max() / 2
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        ax.text(j, i, cm[i, j], ha='center', va='center', fontsize=12,
+                color='white' if cm[i, j] > thresh else 'black')
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=120, bbox_inches='tight')
+    print(f"[INFO] 混同行列: {save_path}")
+    plt.show()
+
+
+# ---- ここに追加（学習曲線保存の直後）----
+# 最終エポックで混同行列を作成
+model.eval()
+all_preds  = []
+all_labels = []
+with torch.no_grad():
+    for imgs, labels in val_loader:
+        imgs   = imgs.to(device)
+        preds  = model(imgs).argmax(dim=1).cpu().tolist()
+        all_preds  += preds
+        all_labels += labels.tolist()
+
+cm = confusion_matrix(all_labels, all_preds)
+plot_confusion_matrix(
+    cm, full_ds.classes,
+    os.path.join(args.output_dir, 'confusion_matrix.png')
+)
+
+
+
 # resnet_classify.py
 # 窪みの切り出し画像から結晶数を分類するResNetベース分類器
 #
