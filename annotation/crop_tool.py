@@ -97,17 +97,19 @@ def register_cavities(img_path, config_path, margin, fixed_size=None):
         if event.inaxes != ax:
             return
         if fixed_size:
-            # プレビュー枠を更新
-            hw, hh = fixed_size[0] / 2, fixed_size[1] / 2
-            px, py = event.xdata - hw, event.ydata - hh
+            fw, fh = fixed_size[0], fixed_size[1]
+            px = event.xdata - fw / 2
+            py = event.ydata - fh / 2
             if state['preview'] is None:
-                r = mpatches.Rectangle((px, py), fixed_size[0], fixed_size[1],
+                r = mpatches.Rectangle((px, py), fw, fh,
                                        linewidth=1, edgecolor='yellow',
                                        facecolor='none', linestyle='--')
                 ax.add_patch(r)
                 state['preview'] = r
             else:
                 state['preview'].set_xy((px, py))
+                state['preview'].set_width(fw)
+                state['preview'].set_height(fh)
             fig.canvas.draw_idle()
         else:
             # ドラッグ中の枠を更新
@@ -123,12 +125,11 @@ def register_cavities(img_path, config_path, margin, fixed_size=None):
         if event.inaxes != ax or event.button != 1:
             return
         if fixed_size:
-            # クリック位置を中心に固定サイズで配置
-            hw, hh = fixed_size[0] / 2, fixed_size[1] / 2
-            x1 = max(0, event.xdata - hw)
-            y1 = max(0, event.ydata - hh)
-            x2 = min(w, event.xdata + hw)
-            y2 = min(h, event.ydata + hh)
+            fw, fh = fixed_size[0], fixed_size[1]
+            x1 = max(0, event.xdata - fw / 2)
+            y1 = max(0, event.ydata - fh / 2)
+            x2 = min(w, x1 + fw)
+            y2 = min(h, y1 + fh)
             add_cavity(x1, y1, x2, y2)
         else:
             # ドラッグ開始
