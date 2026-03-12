@@ -1,50 +1,3 @@
-from sklearn.metrics import confusion_matrix
-import itertools
-
-def plot_confusion_matrix(cm, classes, save_path):
-    fig, ax = plt.subplots(figsize=(len(classes)*2, len(classes)*2))
-    im = ax.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
-    plt.colorbar(im, ax=ax)
-    ax.set_xticks(range(len(classes)))
-    ax.set_yticks(range(len(classes)))
-    ax.set_xticklabels(classes, fontsize=11)
-    ax.set_yticklabels(classes, fontsize=11)
-    ax.set_xlabel('予測', fontsize=12)
-    ax.set_ylabel('正解', fontsize=12)
-    ax.set_title('混同行列', fontsize=13)
-
-    # 各セルに数値を表示
-    thresh = cm.max() / 2
-    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
-        ax.text(j, i, cm[i, j], ha='center', va='center', fontsize=12,
-                color='white' if cm[i, j] > thresh else 'black')
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=120, bbox_inches='tight')
-    print(f"[INFO] 混同行列: {save_path}")
-    plt.show()
-
-
-# ---- ここに追加（学習曲線保存の直後）----
-# 最終エポックで混同行列を作成
-model.eval()
-all_preds  = []
-all_labels = []
-with torch.no_grad():
-    for imgs, labels in val_loader:
-        imgs   = imgs.to(device)
-        preds  = model(imgs).argmax(dim=1).cpu().tolist()
-        all_preds  += preds
-        all_labels += labels.tolist()
-
-cm = confusion_matrix(all_labels, all_preds)
-plot_confusion_matrix(
-    cm, full_ds.classes,
-    os.path.join(args.output_dir, 'confusion_matrix.png')
-)
-
-
-
 # resnet_classify.py
 # 窪みの切り出し画像から結晶数を分類するResNetベース分類器
 #
@@ -228,28 +181,52 @@ def train(args):
 
         # 検証
         model.eval()
-        correct = total = 0
+        correct = total = accepted = uncertain = 0
         with torch.no_grad():
             for imgs, labels in val_loader:
                 imgs, labels = imgs.to(device), labels.to(device)
-                out     = model(imgs)
-                preds   = out.argmax(dim=1)
-                correct += (preds == labels).sum().item()
-                total   += labels.size(0)
+                out      = model(imgs)
+                probs    = torch.softmax(out, dim=1)
+                sorted_p = probs.sort(dim=1, descending=True).values
+                top1     = sorted_p[:, 0]
+                margin   = sorted_p[:, 0] - sorted_p[:, 1]
+                preds    = out.argmax(dim=1)
 
-        acc = correct / total if total > 0 else 0
-        val_accs.append(acc)
-        scheduler.step(acc)
+                for i in range(len(labels)):
+                    total += 1
+                    is_uncertain = (
+                        top1[i].item()   < args.conf_thresh or
+                        margin[i].item() < args.margin_thresh
+                    )
+                    if is_uncertain:
+                        uncertain += 1
+                    else:
+                        accepted += 1
+                        if preds[i] == labels[i]:
+                            correct += 1
 
-        print(f"Epoch {epoch:3d}/{args.epochs}  Loss: {avg_loss:.4f}  Val Acc: {acc:.3f}")
+        acc          = correct / accepted  if accepted  > 0 else 0
+        acc_all      = correct / total     if total     > 0 else 0
+        uncertain_r  = uncertain / total   if total     > 0 else 0
+        val_accs.append(acc_all)
+        scheduler.step(acc_all)
 
-        if acc > best_acc:
-            best_acc = acc
+        if args.conf_thresh > 0 or args.margin_thresh > 0:
+            print(f"Epoch {epoch:3d}/{args.epochs}  Loss: {avg_loss:.4f}"
+                  f"  Acc(採用): {acc:.3f}  Acc(全体): {acc_all:.3f}"
+                  f"  要確認: {uncertain}/{total} ({uncertain_r:.0%})")
+        else:
+            print(f"Epoch {epoch:3d}/{args.epochs}  Loss: {avg_loss:.4f}  Val Acc: {acc_all:.3f}")
+
+        if acc_all > best_acc:
+            best_acc = acc_all
             torch.save({
-                'epoch'  : epoch,
-                'model'  : model.state_dict(),
-                'classes': full_ds.classes,
-                'img_size': args.img_size,
+                'epoch'        : epoch,
+                'model'        : model.state_dict(),
+                'classes'      : full_ds.classes,
+                'img_size'     : args.img_size,
+                'conf_thresh'  : args.conf_thresh,
+                'margin_thresh': args.margin_thresh,
             }, os.path.join(args.output_dir, 'best.pth'))
             print(f"  → ベストモデル保存 (Acc={best_acc:.3f})")
 
@@ -283,10 +260,15 @@ def predict_dir(args):
 
     results = []
     for path in paths:
-        label, conf, all_probs = infer_one(path, device, model, classes, img_size)
-        results.append({'path': path, 'label': label, 'conf': conf, 'all_probs': all_probs})
+        label, conf, all_probs, uncertain = infer_one(
+            path, device, model, classes, img_size,
+            args.conf_thresh, args.margin_thresh
+        )
+        results.append({'path': path, 'label': label, 'conf': conf,
+                        'all_probs': all_probs, 'uncertain': uncertain})
         prob_str = '  '.join(f"{cls}:{p:.0%}" for cls, p in all_probs.items())
-        print(f"  {os.path.basename(path)}: {label}  [{prob_str}]")
+        flag     = '  ⚠️ 要確認' if uncertain else ''
+        print(f"  {os.path.basename(path)}: {label}  [{prob_str}]{flag}")
 
     total = sum(
         int(''.join(filter(str.isdigit, r['label'])) or '0')
@@ -313,10 +295,15 @@ def predict_image(args):
 
     results = []
     for crop_info in crops:
-        label, conf, all_probs = infer_one(crop_info['path'], device, model, classes, img_size)
-        results.append({**crop_info, 'label': label, 'conf': conf, 'all_probs': all_probs})
+        label, conf, all_probs, uncertain = infer_one(
+            crop_info['path'], device, model, classes, img_size,
+            args.conf_thresh, args.margin_thresh
+        )
+        results.append({**crop_info, 'label': label, 'conf': conf,
+                        'all_probs': all_probs, 'uncertain': uncertain})
         prob_str = '  '.join(f"{cls}:{p:.0%}" for cls, p in all_probs.items())
-        print(f"  窪み{crop_info['id']:02d}: {label}  [{prob_str}]")
+        flag     = '  ⚠️ 要確認' if uncertain else ''
+        print(f"  窪み{crop_info['id']:02d}: {label}  [{prob_str}]{flag}")
 
     # 結果表示
     img_pil = Image.open(args.image).convert('RGB')
@@ -324,27 +311,39 @@ def predict_image(args):
     ax.imshow(np.array(img_pil))
     ax.axis('off')
 
-    total = 0
+    total        = 0
+    n_uncertain  = 0
     for r in results:
         x1, y1, x2, y2 = r['bbox']
         n     = int(''.join(filter(str.isdigit, r['label'])) or '0')
         total += n
-        color = ['#888888', '#44cc44', '#ff9900', '#ff4444', '#cc44ff'][min(n, 4)]
-        rect  = mpatches.Rectangle(
+        if r['uncertain']:
+            n_uncertain += 1
+            color    = '#ff0000'   # 要確認は赤
+            alpha    = 0.35
+        else:
+            color = ['#888888', '#44cc44', '#ff9900', '#ff4444', '#cc44ff'][min(n, 4)]
+            alpha = 0.25
+
+        rect = mpatches.Rectangle(
             (x1, y1), x2-x1, y2-y1,
-            linewidth=2, edgecolor=color, facecolor=color, alpha=0.25
+            linewidth=2, edgecolor=color, facecolor=color, alpha=alpha
         )
         ax.add_patch(rect)
 
-        # 全クラスの確率を画像に表示
-        prob_lines = '\n'.join(
-            f"{cls}:{p:.0%}" for cls, p in r['all_probs'].items()
-        )
+        # 全クラスの確率 + 要確認フラグを表示
+        prob_lines = '\n'.join(f"{cls}:{p:.0%}" for cls, p in r['all_probs'].items())
+        if r['uncertain']:
+            prob_lines += '\n⚠️要確認'
         ax.text(x1+3, y1+14, prob_lines,
                 color='white', fontsize=7, fontweight='bold',
                 bbox=dict(facecolor=color, alpha=0.75, pad=2, edgecolor='none'))
 
-    ax.set_title(f'総結晶数: {total}  (窪み数: {len(results)})', fontsize=14)
+    title = f'総結晶数: {total}  (窪み数: {len(results)}'
+    if n_uncertain:
+        title += f'  ⚠️要確認: {n_uncertain}個'
+    title += ')'
+    ax.set_title(title, fontsize=14)
     plt.tight_layout()
 
     save_path = args.output or f'result_classify_{os.path.splitext(os.path.basename(args.image))[0]}.png'
@@ -376,12 +375,14 @@ def load_model(weights_path, cpu=False):
     return device, model, classes, img_size
 
 
-def infer_one(img_path, device, model, classes, img_size):
+def infer_one(img_path, device, model, classes, img_size,
+              conf_thresh=0.0, margin_thresh=0.0):
     """
     Returns:
-        label    : 最高確率のクラス名
-        conf     : 最高確率の値
-        all_probs: 全クラスの確率 {クラス名: 確率}
+        label      : 最高確率のクラス名
+        conf       : 最高確率の値
+        all_probs  : 全クラスの確率 {クラス名: 確率}
+        uncertain  : 要確認フラグ（True=自信なし）
     """
     img = Image.open(img_path).convert('RGB')
     img = img.resize((img_size, img_size), Image.BILINEAR)
@@ -391,9 +392,17 @@ def infer_one(img_path, device, model, classes, img_size):
     with torch.no_grad():
         out       = model(t)
         probs     = torch.softmax(out, dim=1)[0]
+        sorted_p  = probs.sort(descending=True).values
         idx       = probs.argmax().item()
         all_probs = {cls: probs[i].item() for i, cls in enumerate(classes)}
-    return classes[idx], probs[idx].item(), all_probs
+
+    conf   = sorted_p[0].item()
+    margin = (sorted_p[0] - sorted_p[1]).item() if len(sorted_p) > 1 else 1.0
+
+    # 要確認フラグ
+    uncertain = (conf < conf_thresh) or (margin < margin_thresh)
+
+    return classes[idx], conf, all_probs, uncertain
 
 
 # ==================== メイン ====================
@@ -404,29 +413,41 @@ def main():
 
     # train
     t = sub.add_parser('train', help='分類モデルを学習')
-    t.add_argument('--data',        required=True, help='クラス別フォルダのルート')
-    t.add_argument('--output-dir',  default='checkpoints_resnet')
-    t.add_argument('--epochs',      type=int,   default=50)
-    t.add_argument('--batch-size',  type=int,   default=16)
-    t.add_argument('--lr',          type=float, default=1e-4)
-    t.add_argument('--img-size',    type=int,   default=128)
-    t.add_argument('--val-ratio',   type=float, default=0.2)
-    t.add_argument('--no-pretrain', action='store_true')
-    t.add_argument('--cpu',         action='store_true')
+    t.add_argument('--data',           required=True, help='クラス別フォルダのルート')
+    t.add_argument('--output-dir',     default='checkpoints_resnet')
+    t.add_argument('--epochs',         type=int,   default=50)
+    t.add_argument('--batch-size',     type=int,   default=16)
+    t.add_argument('--lr',             type=float, default=1e-4)
+    t.add_argument('--img-size',       type=int,   default=128)
+    t.add_argument('--val-ratio',      type=float, default=0.2)
+    t.add_argument('--conf-thresh',    type=float, default=0.0,
+                   help='最高確率の閾値（例:0.8 → 80%%未満は要確認扱い）')
+    t.add_argument('--margin-thresh',  type=float, default=0.0,
+                   help='1位2位の確率差の閾値（例:0.2 → 差20%%未満は要確認扱い）')
+    t.add_argument('--no-pretrain',    action='store_true')
+    t.add_argument('--cpu',            action='store_true')
 
     # predict（元画像 + config）
     p = sub.add_parser('predict', help='元画像から推論・可視化')
-    p.add_argument('image',      help='入力画像')
-    p.add_argument('--config',   default='cavities.json')
-    p.add_argument('--weights',  required=True)
-    p.add_argument('--output',   default=None)
-    p.add_argument('--cpu',      action='store_true')
+    p.add_argument('image',           help='入力画像')
+    p.add_argument('--config',        default='cavities.json')
+    p.add_argument('--weights',       required=True)
+    p.add_argument('--output',        default=None)
+    p.add_argument('--conf-thresh',   type=float, default=0.0,
+                   help='最高確率の閾値（例:0.8 → 80%%未満は要確認）')
+    p.add_argument('--margin-thresh', type=float, default=0.0,
+                   help='1位2位の確率差の閾値（例:0.2 → 差20%%未満は要確認）')
+    p.add_argument('--cpu',           action='store_true')
 
     # predict-dir（切り出し済みフォルダ）
     d = sub.add_parser('predict-dir', help='切り出し済みフォルダを推論')
-    d.add_argument('crop_dir',  help='切り出し画像フォルダ')
-    d.add_argument('--weights', required=True)
-    d.add_argument('--cpu',     action='store_true')
+    d.add_argument('crop_dir',          help='切り出し画像フォルダ')
+    d.add_argument('--weights',         required=True)
+    d.add_argument('--conf-thresh',     type=float, default=0.0,
+                   help='最高確率の閾値（例:0.8 → 80%%未満は要確認）')
+    d.add_argument('--margin-thresh',   type=float, default=0.0,
+                   help='1位2位の確率差の閾値（例:0.2 → 差20%%未満は要確認）')
+    d.add_argument('--cpu',             action='store_true')
 
     args = parser.parse_args()
     if args.mode == 'train':
