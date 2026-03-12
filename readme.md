@@ -236,9 +236,10 @@ def predict_dir(args):
 
     results = []
     for path in paths:
-        label, conf = infer_one(path, device, model, classes, img_size)
-        results.append({'path': path, 'label': label, 'conf': conf})
-        print(f"  {os.path.basename(path)}: {label}  (conf={conf:.2f})")
+        label, conf, all_probs = infer_one(path, device, model, classes, img_size)
+        results.append({'path': path, 'label': label, 'conf': conf, 'all_probs': all_probs})
+        prob_str = '  '.join(f"{cls}:{p:.0%}" for cls, p in all_probs.items())
+        print(f"  {os.path.basename(path)}: {label}  [{prob_str}]")
 
     total = sum(
         int(''.join(filter(str.isdigit, r['label'])) or '0')
@@ -265,8 +266,10 @@ def predict_image(args):
 
     results = []
     for crop_info in crops:
-        label, conf = infer_one(crop_info['path'], device, model, classes, img_size)
-        results.append({**crop_info, 'label': label, 'conf': conf})
+        label, conf, all_probs = infer_one(crop_info['path'], device, model, classes, img_size)
+        results.append({**crop_info, 'label': label, 'conf': conf, 'all_probs': all_probs})
+        prob_str = '  '.join(f"{cls}:{p:.0%}" for cls, p in all_probs.items())
+        print(f"  窪み{crop_info['id']:02d}: {label}  [{prob_str}]")
 
     # 結果表示
     img_pil = Image.open(args.image).convert('RGB')
@@ -277,7 +280,7 @@ def predict_image(args):
     total = 0
     for r in results:
         x1, y1, x2, y2 = r['bbox']
-        n = int(''.join(filter(str.isdigit, r['label'])) or '0')
+        n     = int(''.join(filter(str.isdigit, r['label'])) or '0')
         total += n
         color = ['#888888', '#44cc44', '#ff9900', '#ff4444', '#cc44ff'][min(n, 4)]
         rect  = mpatches.Rectangle(
@@ -285,9 +288,14 @@ def predict_image(args):
             linewidth=2, edgecolor=color, facecolor=color, alpha=0.25
         )
         ax.add_patch(rect)
-        ax.text(x1+3, y1+14, f"{r['label']}\n{r['conf']:.0%}",
-                color='white', fontsize=8, fontweight='bold',
-                bbox=dict(facecolor=color, alpha=0.7, pad=2, edgecolor='none'))
+
+        # 全クラスの確率を画像に表示
+        prob_lines = '\n'.join(
+            f"{cls}:{p:.0%}" for cls, p in r['all_probs'].items()
+        )
+        ax.text(x1+3, y1+14, prob_lines,
+                color='white', fontsize=7, fontweight='bold',
+                bbox=dict(facecolor=color, alpha=0.75, pad=2, edgecolor='none'))
 
     ax.set_title(f'総結晶数: {total}  (窪み数: {len(results)})', fontsize=14)
     plt.tight_layout()
@@ -322,16 +330,23 @@ def load_model(weights_path, cpu=False):
 
 
 def infer_one(img_path, device, model, classes, img_size):
+    """
+    Returns:
+        label    : 最高確率のクラス名
+        conf     : 最高確率の値
+        all_probs: 全クラスの確率 {クラス名: 確率}
+    """
     img = Image.open(img_path).convert('RGB')
     img = img.resize((img_size, img_size), Image.BILINEAR)
     t   = TF.to_tensor(img)
     t   = TF.normalize(t, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     t   = t.unsqueeze(0).to(device)
     with torch.no_grad():
-        out   = model(t)
-        probs = torch.softmax(out, dim=1)[0]
-        idx   = probs.argmax().item()
-    return classes[idx], probs[idx].item()
+        out       = model(t)
+        probs     = torch.softmax(out, dim=1)[0]
+        idx       = probs.argmax().item()
+        all_probs = {cls: probs[i].item() for i, cls in enumerate(classes)}
+    return classes[idx], probs[idx].item(), all_probs
 
 
 # ==================== メイン ====================
