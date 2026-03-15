@@ -1,12 +1,12 @@
 """
 EfficientNet-B0 for crystal count regression.
 Usage:
-  Train:   python efficientnet_main.py train --data_dir ./data --epochs 30
+  Train:   python efficientnet_main.py train --images ./data/images --annotations ./data/annotations.json --epochs 30
   Infer:   python efficientnet_main.py infer --image path/to/image.png --checkpoint best.pth
   GradCAM: python efficientnet_main.py gradcam --image path/to/image.png --checkpoint best.pth
 
 Size:224x224
-  
+
 """
 
 import argparse
@@ -28,24 +28,36 @@ from torch.utils.tensorboard import SummaryWriter
 
 class CrystalDataset(Dataset):
     """
-    Expected directory layout:
-        data_dir/
-            images/   *.png (or *.jpg)
-            labels.csv   (columns: filename, count)
+    COCO-format dataset for crystal count regression.
+    Expected layout:
+        images_dir/   *.png (or *.jpg)
+        json_path     COCO annotations JSON (created by annotation_coco2.py)
+
+    Crystal count per image = number of annotations for that image.
     """
 
-    def __init__(self, data_dir: str, transform=None):
-        import csv
-        self.data_dir = Path(data_dir)
+    def __init__(self, images_dir: str, json_path: str, transform=None):
+        import json
         self.transform = transform
         self.samples = []
 
-        csv_path = self.data_dir / "labels.csv"
-        with open(csv_path, newline="") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                img_path = self.data_dir / "images" / row["filename"]
-                self.samples.append((img_path, float(row["count"])))
+        with open(json_path) as f:
+            coco = json.load(f)
+
+        count_map = {}
+        for ann in coco['annotations']:
+            iid = ann['image_id']
+            count_map[iid] = count_map.get(iid, 0) + 1
+
+        images_dir = Path(images_dir)
+        for img_info in coco['images']:
+            iid      = img_info['id']
+            count    = float(count_map.get(iid, 0))
+            img_path = images_dir / img_info['file_name']
+            if img_path.exists():
+                self.samples.append((img_path, count))
+
+        print(f"[INFO] Dataset: {len(self.samples)} images")
 
     def __len__(self):
         return len(self.samples)
@@ -107,11 +119,11 @@ def train(args):
     print(f"Device: {device}")
 
     # Dataset
-    dataset = CrystalDataset(args.data_dir, transform=get_transforms(train=True))
+    dataset = CrystalDataset(args.images, args.annotations, transform=get_transforms(train=True))
     val_size = max(1, int(len(dataset) * args.val_split))
     train_size = len(dataset) - val_size
     train_ds, val_ds = random_split(dataset, [train_size, val_size])
-    val_ds.dataset = CrystalDataset(args.data_dir, transform=get_transforms(train=False))
+    val_ds.dataset = CrystalDataset(args.images, args.annotations, transform=get_transforms(train=False))
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2)
@@ -267,8 +279,10 @@ def parse_args():
 
     # --- train ---
     p_train = sub.add_parser("train", help="Run training")
-    p_train.add_argument("--data_dir",       default="./data",
-                         help="Root directory containing images/ folder and labels.csv (default: ./data)")
+    p_train.add_argument("--images",         required=True,
+                         help="Directory containing image files")
+    p_train.add_argument("--annotations",    required=True,
+                         help="COCO annotations JSON path (created by annotation_coco2.py)")
     p_train.add_argument("--epochs",         type=int,   default=30,
                          help="Maximum number of training epochs (default: 30)")
     p_train.add_argument("--batch_size",     type=int,   default=16,
