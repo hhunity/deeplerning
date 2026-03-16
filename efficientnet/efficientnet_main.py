@@ -1,12 +1,12 @@
 """
-EfficientNet-B0 for crystal count regression.
+EfficientNet-B0 for crystal count regression or classification.
 Usage:
-  Train:   python efficientnet_main.py train --images ./data/images --annotations ./data/annotations.json --epochs 30
-  Infer:   python efficientnet_main.py infer --image path/to/image.png --checkpoint best.pth
-  GradCAM: python efficientnet_main.py gradcam --image path/to/image.png --checkpoint best.pth
+  Train (regression):      python efficientnet_main.py train --images ./data/images --annotations ./data/annotations.json
+  Train (classification):  python efficientnet_main.py train --images ./data/images --annotations ./data/annotations.json --task classification --num_classes 11
+  Infer:                   python efficientnet_main.py infer --image path/to/image.png --checkpoint best.pth
+  GradCAM:                 python efficientnet_main.py gradcam --image path/to/image.png --checkpoint best.pth
 
-Size:224x224
-
+Size: 224x224
 """
 
 import argparse
@@ -67,7 +67,8 @@ class CrystalDataset(Dataset):
         image = Image.open(img_path).convert("RGB")
         if self.transform:
             image = self.transform(image)
-        return image, torch.tensor(count, dtype=torch.float32)
+        # Return count as int; caller casts to float (regression) or long (classification)
+        return image, int(count)
 
 
 def get_transforms(train: bool):
@@ -100,12 +101,13 @@ def get_transforms(train: bool):
 # Model
 # ---------------------------------------------------------------------------
 
-def build_model(dropout: float = 0.4) -> nn.Module:
+def build_model(dropout: float = 0.4, num_classes: int = 1) -> nn.Module:
+    """num_classes=1 → regression output; num_classes>1 → classification output."""
     model = models.efficientnet_b0(weights=EfficientNet_B0_Weights.IMAGENET1K_V1)
     in_features = model.classifier[1].in_features
     model.classifier = nn.Sequential(
         nn.Dropout(p=dropout),
-        nn.Linear(in_features, 1),
+        nn.Linear(in_features, num_classes),
     )
     return model
 
@@ -128,8 +130,13 @@ def train(args):
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=2)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=2)
 
+    # Task setup
+    is_classification = (args.task == "classification")
+    num_classes = args.num_classes if is_classification else 1
+    print(f"Task: {args.task}" + (f"  (num_classes={num_classes})" if is_classification else ""))
+
     # Model
-    model = build_model(dropout=args.dropout).to(device)
+    model = build_model(dropout=args.dropout, num_classes=num_classes).to(device)
 
     # Backbone frozen (head_only mode or Stage 1)
     if args.head_only:
@@ -140,7 +147,7 @@ def train(args):
                                  weight_decay=args.weight_decay)
 
     # Loss
-    criterion = nn.HuberLoss()
+    criterion = nn.CrossEntropyLoss() if is_classification else nn.HuberLoss()
 
     # Scheduler (optional)
     scheduler = None
@@ -173,9 +180,10 @@ def train(args):
         model.train()
         train_loss = 0.0
         for images, labels in train_loader:
-            images, labels = images.to(device), labels.to(device)
+            images = images.to(device)
+            labels = labels.long().to(device) if is_classification else labels.float().to(device)
             optimizer.zero_grad()
-            preds = model(images).squeeze(1)
+            preds = model(images) if is_classification else model(images).squeeze(1)
             loss = criterion(preds, labels)
             loss.backward()
             optimizer.step()
@@ -187,8 +195,9 @@ def train(args):
         val_loss = 0.0
         with torch.no_grad():
             for images, labels in val_loader:
-                images, labels = images.to(device), labels.to(device)
-                preds = model(images).squeeze(1)
+                images = images.to(device)
+                labels = labels.long().to(device) if is_classification else labels.float().to(device)
+                preds = model(images) if is_classification else model(images).squeeze(1)
                 val_loss += criterion(preds, labels).item() * len(images)
         val_loss /= val_size
 
@@ -203,7 +212,11 @@ def train(args):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             no_improve = 0
-            torch.save(model.state_dict(), save_path / "best.pth")
+            torch.save({
+                "model"      : model.state_dict(),
+                "task"       : args.task,
+                "num_classes": num_classes,
+            }, save_path / "best.pth")
             print(f"  -> Saved best model (val_loss={best_val_loss:.4f})")
         else:
             no_improve += 1
@@ -219,21 +232,43 @@ def train(args):
 # Inference
 # ---------------------------------------------------------------------------
 
+def _load_checkpoint(checkpoint_path, device):
+    """Load model from checkpoint. Supports both legacy (state_dict only) and new (dict) format."""
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        task        = ckpt.get("task", "regression")
+        num_classes = ckpt.get("num_classes", 1)
+        state_dict  = ckpt["model"]
+    else:
+        task        = "regression"
+        num_classes = 1
+        state_dict  = ckpt
+    model = build_model(num_classes=num_classes).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model, task, num_classes
+
+
 def infer(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model().to(device)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    model.eval()
+    model, task, num_classes = _load_checkpoint(args.checkpoint, device)
 
     transform = get_transforms(train=False)
     image = Image.open(args.image).convert("RGB")
     tensor = transform(image).unsqueeze(0).to(device)
 
     with torch.no_grad():
-        pred = model(tensor).squeeze().item()
-
-    print(f"Predicted crystal count: {pred:.2f}  (rounded: {round(pred)})")
-    return pred
+        out = model(tensor)
+        if task == "classification":
+            probs      = torch.softmax(out, dim=1)[0]
+            pred_class = probs.argmax().item()
+            confidence = probs[pred_class].item()
+            print(f"Predicted crystal count: {pred_class}  (confidence: {confidence:.2%})")
+            return pred_class
+        else:
+            pred = out.squeeze().item()
+            print(f"Predicted crystal count: {pred:.2f}  (rounded: {round(pred)})")
+            return pred
 
 
 # ---------------------------------------------------------------------------
@@ -249,9 +284,7 @@ def gradcam(args):
         return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model().to(device)
-    model.load_state_dict(torch.load(args.checkpoint, map_location=device))
-    model.eval()
+    model, _, _ = _load_checkpoint(args.checkpoint, device)
 
     transform = get_transforms(train=False)
     raw_image = Image.open(args.image).convert("RGB").resize((224, 224))
@@ -283,6 +316,11 @@ def parse_args():
                          help="Directory containing image files")
     p_train.add_argument("--annotations",    required=True,
                          help="COCO annotations JSON path (created by annotation_coco2.py)")
+    p_train.add_argument("--task",           default="regression",
+                         choices=["regression", "classification"],
+                         help="regression: HuberLoss scalar output / classification: CrossEntropyLoss (default: regression)")
+    p_train.add_argument("--num_classes",    type=int, default=11,
+                         help="Number of classes for classification task (default: 11, i.e. 0-10 crystals)")
     p_train.add_argument("--epochs",         type=int,   default=30,
                          help="Maximum number of training epochs (default: 30)")
     p_train.add_argument("--batch_size",     type=int,   default=16,
