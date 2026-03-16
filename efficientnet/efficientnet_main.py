@@ -415,6 +415,47 @@ def validate(args):
 
     print(f"\nPlots saved to: {out_dir}/")
 
+    # Grad-CAM for worst predictions
+    if args.top_errors > 0:
+        try:
+            from pytorch_grad_cam import GradCAM
+            from pytorch_grad_cam.utils.image import show_cam_on_image
+        except ImportError:
+            print("Install grad-cam to use --top_errors: pip install grad-cam")
+            return
+
+        worst_indices = np.argsort(np.abs(errors))[::-1][:args.top_errors]
+        gradcam_dir = out_dir / "top_errors"
+        gradcam_dir.mkdir(exist_ok=True)
+
+        target_layers = [model.features[-1]]
+        cam = GradCAM(model=model, target_layers=target_layers)
+
+        print(f"\nTop-{args.top_errors} errors — Grad-CAM:")
+        for rank, idx in enumerate(worst_indices, start=1):
+            img_path = images_dir / filenames[idx]
+            raw = Image.open(img_path).convert("RGB").resize((224, 224))
+            tensor = transform(raw).unsqueeze(0).to(device)
+
+            grayscale_cam = cam(input_tensor=tensor)[0]
+            rgb_img = np.array(raw, dtype=np.float32) / 255.0
+            cam_image = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+
+            title = f"truth={truths[idx]:.0f}  pred={preds[idx]:.2f}  error={errors[idx]:+.2f}"
+            fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+            axes[0].imshow(raw)
+            axes[0].set_title(f"#{rank}  {filenames[idx]}")
+            axes[0].axis("off")
+            axes[1].imshow(cam_image)
+            axes[1].set_title(title)
+            axes[1].axis("off")
+            fig.tight_layout()
+
+            out_path = gradcam_dir / f"{rank:02d}_{Path(filenames[idx]).stem}_gradcam.png"
+            fig.savefig(out_path, dpi=150)
+            plt.close(fig)
+            print(f"  #{rank:2d}  {filenames[idx]:<30}  {title}  -> {out_path.name}")
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -478,6 +519,8 @@ def parse_args():
                        help="Path to the trained model weights file (.pth) (default: checkpoints/best.pth)")
     p_val.add_argument("--out_dir",     default="validation_results",
                        help="Directory to save scatter_plot.png and error_hist.png (default: validation_results)")
+    p_val.add_argument("--top_errors", type=int, default=0,
+                       help="Output Grad-CAM for the N worst predictions (default: 0 = disabled, requires: pip install grad-cam)")
 
     return parser.parse_args()
 
