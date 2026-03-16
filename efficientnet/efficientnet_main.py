@@ -413,7 +413,79 @@ def validate(args):
     fig.savefig(out_dir / "error_hist.png", dpi=150)
     plt.close(fig)
 
+    # Per-count error breakdown
+    unique_counts = sorted(set(truths.astype(int).tolist()))
+    breakdown = []
+    for c in unique_counts:
+        mask = truths == c
+        e = errors[mask]
+        breakdown.append((c, mask.sum(), np.mean(np.abs(e)), np.sqrt(np.mean(e**2)), np.mean(e)))
+
+    print("\nPer-count Error Breakdown")
+    print("=========================")
+    print(f"{'truth':>6} {'n':>4} {'MAE':>7} {'RMSE':>7} {'mean_err':>10}")
+    print("-" * 40)
+    for c, n, c_mae, c_rmse, c_mean in breakdown:
+        print(f"{c:>6} {n:>4} {c_mae:>7.2f} {c_rmse:>7.2f} {c_mean:>+10.2f}")
+
+    counts_arr  = [b[0] for b in breakdown]
+    maes_arr    = [b[2] for b in breakdown]
+    ns_arr      = [b[1] for b in breakdown]
+    fig, ax = plt.subplots(figsize=(max(6, len(counts_arr) * 0.7), 4))
+    bars = ax.bar(range(len(counts_arr)), maes_arr, edgecolor="k")
+    for bar, n in zip(bars, ns_arr):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                f"n={n}", ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(range(len(counts_arr)))
+    ax.set_xticklabels(counts_arr)
+    ax.set_xlabel("Ground truth (crystal count)")
+    ax.set_ylabel("MAE")
+    ax.set_title("MAE per Crystal Count")
+    fig.tight_layout()
+    fig.savefig(out_dir / "per_count_mae.png", dpi=150)
+    plt.close(fig)
+
+    # Confusion matrix (classification only)
+    if task == "classification":
+        labels = sorted(set(truths.astype(int).tolist()) | set(np.round(preds).astype(int).tolist()))
+        label_to_idx = {l: i for i, l in enumerate(labels)}
+        n = len(labels)
+        cm = np.zeros((n, n), dtype=int)
+        for t, p in zip(truths.astype(int), np.round(preds).astype(int)):
+            if t in label_to_idx and p in label_to_idx:
+                cm[label_to_idx[t], label_to_idx[p]] += 1
+
+        fig, ax = plt.subplots(figsize=(max(5, n * 0.7), max(5, n * 0.7)))
+        im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
+        fig.colorbar(im, ax=ax)
+        ax.set_xticks(range(n))
+        ax.set_yticks(range(n))
+        ax.set_xticklabels(labels)
+        ax.set_yticklabels(labels)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Ground truth")
+        ax.set_title("Confusion Matrix")
+        thresh = cm.max() / 2
+        for i in range(n):
+            for j in range(n):
+                ax.text(j, i, cm[i, j], ha="center", va="center",
+                        color="white" if cm[i, j] > thresh else "black", fontsize=9)
+        fig.tight_layout()
+        fig.savefig(out_dir / "confusion_matrix.png", dpi=150)
+        plt.close(fig)
+        print(f"Confusion matrix saved to: {out_dir}/confusion_matrix.png")
+
+    # CSV export
+    import csv
+    csv_path = out_dir / "results.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["image", "truth", "pred", "error", "abs_error"])
+        for fname, t, p, e in zip(filenames, truths, preds, errors):
+            writer.writerow([fname, int(t), round(p, 4), round(e, 4), round(abs(e), 4)])
+
     print(f"\nPlots saved to: {out_dir}/")
+    print(f"CSV  saved to: {csv_path}")
 
     # Grad-CAM for worst predictions
     if args.top_errors > 0:
