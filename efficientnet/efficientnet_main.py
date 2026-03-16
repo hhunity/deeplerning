@@ -291,13 +291,29 @@ def infer(args):
         rgb_img = np.array(raw_image, dtype=np.float32) / 255.0
         cam_image = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
 
-        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-        axes[0].imshow(raw_image)
-        axes[0].set_title("Original")
-        axes[0].axis("off")
-        axes[1].imshow(cam_image)
-        axes[1].set_title(f"Grad-CAM  {pred_label}")
-        axes[1].axis("off")
+        if task == "classification":
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            axes[0].imshow(raw_image)
+            axes[0].set_title("Original")
+            axes[0].axis("off")
+            axes[1].imshow(cam_image)
+            axes[1].set_title(f"Grad-CAM  {pred_label}")
+            axes[1].axis("off")
+            num_cls = probs.shape[0]
+            colors = ["tomato" if i == pred_class else "steelblue" for i in range(num_cls)]
+            axes[2].bar(range(num_cls), probs.cpu().numpy(), color=colors)
+            axes[2].set_xlabel("Crystal count (class)")
+            axes[2].set_ylabel("Probability")
+            axes[2].set_title("Class Probabilities")
+            axes[2].set_xticks(range(num_cls))
+        else:
+            fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+            axes[0].imshow(raw_image)
+            axes[0].set_title("Original")
+            axes[0].axis("off")
+            axes[1].imshow(cam_image)
+            axes[1].set_title(f"Grad-CAM  {pred_label}")
+            axes[1].axis("off")
         fig.tight_layout()
 
         out_path = Path(args.image).stem + "_gradcam.png"
