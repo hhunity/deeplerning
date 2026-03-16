@@ -4,12 +4,13 @@ Usage:
   Train (regression):      python efficientnet_main.py train --images ./data/images --annotations ./data/annotations.json
   Train (classification):  python efficientnet_main.py train --images ./data/images --annotations ./data/annotations.json --task classification --num_classes 11
   Infer:                   python efficientnet_main.py infer --image path/to/image.png --checkpoint best.pth
-  GradCAM:                 python efficientnet_main.py gradcam --image path/to/image.png --checkpoint best.pth
+  Validate:                python efficientnet_main.py validate --images ./data/images --annotations ./data/annotations.json
 
 Size: 224x224
 """
 
 import argparse
+import datetime
 from pathlib import Path
 
 import torch
@@ -156,7 +157,9 @@ def train(args):
     elif args.scheduler == "step":
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
 
-    writer = SummaryWriter(log_dir=args.log_dir)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = Path(args.log_dir) / timestamp
+    writer = SummaryWriter(log_dir=str(log_dir))
     best_val_loss = float("inf")
     no_improve = 0
     save_path = Path(args.checkpoint_dir)
@@ -254,8 +257,8 @@ def infer(args):
     model, task, num_classes = _load_checkpoint(args.checkpoint, device)
 
     transform = get_transforms(train=False)
-    image = Image.open(args.image).convert("RGB")
-    tensor = transform(image).unsqueeze(0).to(device)
+    raw_image = Image.open(args.image).convert("RGB").resize((224, 224))
+    tensor = transform(raw_image).unsqueeze(0).to(device)
 
     with torch.no_grad():
         out = model(tensor)
@@ -263,43 +266,138 @@ def infer(args):
             probs      = torch.softmax(out, dim=1)[0]
             pred_class = probs.argmax().item()
             confidence = probs[pred_class].item()
+            pred_label = f"count={pred_class} ({confidence:.2%})"
             print(f"Predicted crystal count: {pred_class}  (confidence: {confidence:.2%})")
-            return pred_class
+            result = pred_class
         else:
             pred = out.squeeze().item()
+            pred_label = f"count={pred:.2f} (rounded={round(pred)})"
             print(f"Predicted crystal count: {pred:.2f}  (rounded: {round(pred)})")
-            return pred
+            result = pred
+
+    if args.gradcam:
+        try:
+            import matplotlib.pyplot as plt
+            from pytorch_grad_cam import GradCAM
+            from pytorch_grad_cam.utils.image import show_cam_on_image
+        except ImportError:
+            print("Install required packages: pip install grad-cam matplotlib")
+            return result
+
+        target_layers = [model.features[-1]]
+        cam = GradCAM(model=model, target_layers=target_layers)
+        grayscale_cam = cam(input_tensor=tensor)[0]
+
+        rgb_img = np.array(raw_image, dtype=np.float32) / 255.0
+        cam_image = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+        axes[0].imshow(raw_image)
+        axes[0].set_title("Original")
+        axes[0].axis("off")
+        axes[1].imshow(cam_image)
+        axes[1].set_title(f"Grad-CAM  {pred_label}")
+        axes[1].axis("off")
+        fig.tight_layout()
+
+        out_path = Path(args.image).stem + "_gradcam.png"
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"Grad-CAM saved to: {out_path}")
+
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Grad-CAM
+# Validation
 # ---------------------------------------------------------------------------
 
-def gradcam(args):
-    try:
-        from pytorch_grad_cam import GradCAM
-        from pytorch_grad_cam.utils.image import show_cam_on_image
-    except ImportError:
-        print("Install grad-cam: pip install grad-cam")
-        return
+def validate(args):
+    import json
+    import matplotlib.pyplot as plt
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, _, _ = _load_checkpoint(args.checkpoint, device)
+    model, task, _ = _load_checkpoint(args.checkpoint, device)
+
+    with open(args.annotations) as f:
+        coco = json.load(f)
+
+    count_map = {}
+    for ann in coco["annotations"]:
+        iid = ann["image_id"]
+        count_map[iid] = count_map.get(iid, 0) + 1
 
     transform = get_transforms(train=False)
-    raw_image = Image.open(args.image).convert("RGB").resize((224, 224))
-    input_tensor = transform(raw_image).unsqueeze(0).to(device)
+    images_dir = Path(args.images)
 
-    target_layers = [model.features[-1]]
-    cam = GradCAM(model=model, target_layers=target_layers)
-    grayscale_cam = cam(input_tensor=input_tensor)[0]
+    filenames, truths, preds = [], [], []
+    for img_info in coco["images"]:
+        img_path = images_dir / img_info["file_name"]
+        if not img_path.exists():
+            continue
+        truth = count_map.get(img_info["id"], 0)
 
-    rgb_img = np.array(raw_image, dtype=np.float32) / 255.0
-    visualization = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True)
+        raw = Image.open(img_path).convert("RGB").resize((224, 224))
+        tensor = transform(raw).unsqueeze(0).to(device)
+        with torch.no_grad():
+            out = model(tensor)
+            if task == "classification":
+                pred = torch.softmax(out, dim=1)[0].argmax().item()
+            else:
+                pred = out.squeeze().item()
 
-    out_path = Path(args.image).stem + "_gradcam.png"
-    Image.fromarray(visualization).save(out_path)
-    print(f"Grad-CAM saved to: {out_path}")
+        filenames.append(img_info["file_name"])
+        truths.append(truth)
+        preds.append(pred)
+
+    truths = np.array(truths, dtype=float)
+    preds  = np.array(preds,  dtype=float)
+    errors = preds - truths
+    mae    = np.mean(np.abs(errors))
+    rmse   = np.sqrt(np.mean(errors ** 2))
+    ss_res = np.sum(errors ** 2)
+    ss_tot = np.sum((truths - truths.mean()) ** 2)
+    r2     = 1 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+
+    print("\nValidation Results")
+    print("==================")
+    print(f"MAE  : {mae:.3f}")
+    print(f"RMSE : {rmse:.3f}")
+    print(f"R²   : {r2:.3f}")
+    print()
+    print(f"{'image':<30} {'truth':>6} {'pred':>7} {'error':>7}")
+    print("-" * 55)
+    for fname, t, p, e in zip(filenames, truths, preds, errors):
+        print(f"{fname:<30} {t:>6.0f} {p:>7.2f} {e:>+7.2f}")
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Scatter plot: prediction vs truth
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(truths, preds, alpha=0.7, edgecolors="k", linewidths=0.5)
+    lim = max(truths.max(), preds.max()) * 1.05
+    ax.plot([0, lim], [0, lim], "r--", linewidth=1, label="ideal")
+    ax.set_xlabel("Ground truth")
+    ax.set_ylabel("Prediction")
+    ax.set_title(f"Prediction vs Truth  (MAE={mae:.2f}, R²={r2:.3f})")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_dir / "scatter_plot.png", dpi=150)
+    plt.close(fig)
+
+    # Error histogram
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(errors, bins=20, edgecolor="k")
+    ax.axvline(0, color="r", linestyle="--", linewidth=1)
+    ax.set_xlabel("Error (pred - truth)")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Error Distribution  (RMSE={rmse:.2f})")
+    fig.tight_layout()
+    fig.savefig(out_dir / "error_hist.png", dpi=150)
+    plt.close(fig)
+
+    print(f"\nPlots saved to: {out_dir}/")
 
 
 # ---------------------------------------------------------------------------
@@ -351,13 +449,19 @@ def parse_args():
                          help="Path to the input image file")
     p_infer.add_argument("--checkpoint", default="checkpoints/best.pth",
                          help="Path to the trained model weights file (.pth) (default: checkpoints/best.pth)")
+    p_infer.add_argument("--gradcam", action="store_true",
+                         help="Also output Grad-CAM visualization alongside prediction (requires: pip install grad-cam matplotlib)")
 
-    # --- gradcam ---
-    p_gc = sub.add_parser("gradcam", help="Visualize prediction basis with Grad-CAM (requires: pip install grad-cam)")
-    p_gc.add_argument("--image",      required=True,
-                      help="Path to the input image file")
-    p_gc.add_argument("--checkpoint", default="checkpoints/best.pth",
-                      help="Path to the trained model weights file (.pth) (default: checkpoints/best.pth)")
+    # --- validate ---
+    p_val = sub.add_parser("validate", help="Batch validation: compare predictions against ground truth labels")
+    p_val.add_argument("--images",      required=True,
+                       help="Directory containing image files")
+    p_val.add_argument("--annotations", required=True,
+                       help="COCO annotations JSON path")
+    p_val.add_argument("--checkpoint",  default="checkpoints/best.pth",
+                       help="Path to the trained model weights file (.pth) (default: checkpoints/best.pth)")
+    p_val.add_argument("--out_dir",     default="validation_results",
+                       help="Directory to save scatter_plot.png and error_hist.png (default: validation_results)")
 
     return parser.parse_args()
 
@@ -368,5 +472,5 @@ if __name__ == "__main__":
         train(args)
     elif args.mode == "infer":
         infer(args)
-    elif args.mode == "gradcam":
-        gradcam(args)
+    elif args.mode == "validate":
+        validate(args)
