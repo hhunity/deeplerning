@@ -11,6 +11,29 @@
 mask = mask_frame_by_contour(img_gray)
 input_tensor = np.stack([img_gray, mask], axis=0)  # (2, H, W)
 
+この場合最初の層を変える必要あり
+
+import torchvision.models as models
+import torch.nn as nn
+
+model = models.efficientnet_b0(pretrained=True)
+
+# EfficientNetの最初のconvはここにある
+old_conv = model.features[0][0]
+model.features[0][0] = nn.Conv2d(
+    in_channels=2,
+    out_channels=old_conv.out_channels,
+    kernel_size=old_conv.kernel_size,
+    stride=old_conv.stride,
+    padding=old_conv.padding,
+    bias=old_conv.bias is not None
+)
+
+with torch.no_grad():
+    model.features[0][0].weight[:] = old_conv.weight[:, :2, :, :]
+
+
+
 モデルに「ここはフチ外だから無視しろ」という情報を渡しつつ、画像自体はいじらない。フチにかかった結晶の形も保たれるので、モデルが自分で判断できます。
 パターンB：前処理で黒塗り（シンプル）
 
