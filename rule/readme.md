@@ -13,6 +13,15 @@ input_tensor = np.stack([img_gray, mask], axis=0)  # (2, H, W)
 
 この場合最初の層を変える必要あり
 
+損失関数で無視する
+
+# フチ外のピクセル/領域をloss計算から除外
+loss = criterion(pred, target, reduction='none')  # 要素ごとのloss
+loss = loss * mask  # フチ外はlossが0
+loss = loss.sum() / mask.sum()
+
+
+
 import torchvision.models as models
 import torch.nn as nn
 
