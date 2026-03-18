@@ -1,3 +1,118 @@
+from PIL import Image, ImageDraw, ImageFilter, ImageChops
+import random
+import numpy as np
+
+def add_dirt_pillow(img, dirt_color='black', noise_amount=15, spot_count=50, spot_radius_range=(1, 5), blur_dirt=True):
+    """
+    Pillowを使ってグレースケール画像に汚れ（ノイズとシミ）を付加する関数。
+    入力と出力のサイズは不変。
+    
+    - dirt_color: 汚れの色。'black'（黒いシミ・泥）か 'white'（白い粉・ペンキ）
+    - noise_amount: 細かいホコリノイズの強さ（0〜255）
+    - spot_count: シミ（円）の数
+    - spot_radius_range: シミの半径の範囲（最小, 最大）ピクセル
+    - blur_dirt: Trueなら汚れを少しぼかして画像に馴染ませる
+    """
+    # 1. 画像がグレースケール('L')であることを確認（念のため）
+    if img.mode != 'L':
+        img = img.convert('L')
+    
+    width, height = img.size
+    
+    # --- 工程A: シミ（円）を描画するマスクを作成 ---
+    # まずは真っ黒なキャンバスを用意
+    mask = Image.new('L', (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    
+    for _ in range(spot_count):
+        # ランダムな位置とサイズを決定
+        x = random.randint(0, width)
+        y = random.randint(0, height)
+        radius = random.randint(spot_radius_range[0], spot_radius_range[1])
+        
+        # Pillowで円（楕円）を描画: (左上x, 左上y, 右下x, 右下y)
+        # 汚れの「濃さ」もランダムにする (100〜200)
+        opacity = random.randint(100, 200)
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=opacity)
+    
+    # --- 工程B: ホコリノイズを作成 ---
+    # Pillow単体ではやりにくいので、ここはNumPyを使うのがラク
+    noise_array = np.random.normal(0, noise_amount, (height, width)).astype(np.int16)
+    # ノイズ配列をPillow画像に変換（符号付きint16を扱うため一度Mode='I'などにする必要があるが、
+    # ここでは後でNumPy計算するので、配列のまま保持）
+
+    # --- 工程C: 画像と汚れを合成する ---
+    # 計算のために元画像をNumPy配列にする
+    img_array = np.array(img, dtype=np.int16)
+    mask_array = np.array(mask, dtype=np.int16)
+    
+    if dirt_color == 'black':
+        # 黒い汚れ: 元画像から「シミ」と「ノイズ」を【引く】
+        # (noise_arrayは平均0なので、正の部分が引かれ、負の部分は足される->ホコリっぽくなる)
+        result_array = img_array - mask_array - noise_array
+        
+    elif dirt_color == 'white':
+        # 白い汚れ: 元画像に「シミ」と「ノイズ」を【足す】
+        result_array = img_array + mask_array + noise_array
+        
+    else:
+        raise ValueError("dirt_color must be 'black' or 'white'")
+    
+    # 0〜255の範囲に収めて（クリッピング）、8ビット(uint8)に戻す
+    result_array = np.clip(result_array, 0, 255).astype(np.uint8)
+    img_dirty = Image.fromarray(result_array, mode='L')
+    
+    # --- 工程D: 馴染ませる（オプション） ---
+    if blur_dirt:
+        # 汚れが付いた画像を薄くぼかす（GaussianBlur）
+        # radiusが小さいほど馴染み、大きいとただのボケ画像になる
+        img_dirty = img_dirty.filter(ImageFilter.GaussianBlur(radius=0.8))
+    
+    return img_dirty
+
+# ==========================================
+# 実行例
+# ==========================================
+if __name__ == "__main__":
+    # 巨大画像の制限解除
+    Image.MAX_IMAGE_PIXELS = None
+    
+    # 元画像を読み込む（グレースケールで）
+    try:
+        img_src = Image.open("input.tif").convert('L')
+    except FileNotFoundError:
+        print("エラー: input.tifが見つかりません。")
+        exit()
+
+    print(f"画像を処理中... サイズ: {img_src.size}")
+
+    # 1. 初期のような「黒い汚れ（泥、砂ぼこり）」を強めにつける
+    img_black_dirt = add_dirt_pillow(
+        img_src, 
+        dirt_color='black', 
+        noise_amount=25,       # ホコリ多め
+        spot_count=100,         # シミ多め
+        spot_radius_range=(2, 8) # シミ大きめ
+    )
+    img_black_dirt.save("output_dirt_black.tif")
+    print("黒い汚れ画像を保存しました。")
+
+    # 2. 2回目の要求のような「白い汚れ（粉、飛び散り）」を薄くつける
+    img_white_dirt = add_dirt_pillow(
+        img_src, 
+        dirt_color='white', 
+        noise_amount=10,        # 粉少なめ
+        spot_count=150,          # 飛び散り多め（小さな点）
+        spot_radius_range=(1, 3), # 点は小さく
+        blur_dirt=True          # 馴染ませる（粉っぽくするのに重要）
+    )
+    img_white_dirt.save("output_dirt_white.tif")
+    print("白い汚れ画像を保存しました。")
+
+    print("すべての処理が完了しました。")
+
+
+
 from PIL import Image, ImageFilter, ImageEnhance
 import numpy as np
 
