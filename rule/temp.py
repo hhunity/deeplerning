@@ -1,4 +1,38 @@
 
+from PIL import Image
+import numpy as np
+
+def add_brightness(img, value=30):
+    """
+    画像全体に一定の輝度値（定数）を一律で足し引きする関数。
+    入力出力サイズは変更なし、グレースケール専用。
+    
+    - value: 足し引きする輝度の値。
+             正の数で全体が白っぽく明るくなり（例: 30）、
+             負の数で全体が黒っぽく沈む（例: -20）。
+    """
+    # 念のためグレースケール確認
+    if img.mode != 'L':
+        img = img.convert('L')
+
+    # 計算中に255を超えたり0未満になったりして画像がバグるのを防ぐため、
+    # 一度余裕のある int16 型の配列にする
+    img_array = np.array(img, dtype=np.int16)
+    
+    # 全てのピクセルに一律で値を足す（負の数なら引かれる）
+    result_array = img_array + value
+    
+    # 0〜255の範囲にピタッと収める（クリッピング）
+    result_array = np.clip(result_array, 0, 255).astype(np.uint8)
+    
+    return Image.fromarray(result_array, mode='L')
+
+# --- 使い方の例 ---
+# img = add_brightness(img, value=40)   # 全体のピクセル値に+40する（輝度UP）
+# img = add_brightness(img, value=-25)  # 全体のピクセル値から-25する（輝度DOWN）
+
+
+
 from PIL import Image, ImageDraw, ImageFilter
 import random
 import numpy as np
