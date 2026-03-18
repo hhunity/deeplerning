@@ -1,3 +1,58 @@
+
+from PIL import Image, ImageDraw, ImageFilter
+import random
+import numpy as np
+
+def add_white_splatter(img, num_splatters=10, droplets_per_splatter=(5, 15), spread=20, blur_radius=1.5):
+    """
+    ペンキや液体が飛び散ったような「いびつな白い塊」を付加する関数。
+    入力出力サイズは変更なし、グレースケール専用。
+    
+    - num_splatters: 飛び散り（塊）の数
+    - droplets_per_splatter: 1つの塊を構成する小さな円の数（最小, 最大）
+    - spread: 飛沫が散らばる範囲（ピクセル）。大きいほど広範囲に飛び散る。
+    - blur_radius: ぼかしの強さ。液体っぽく馴染ませるのに重要。
+    """
+    if img.mode != 'L':
+        img = img.convert('L')
+        
+    width, height = img.size
+    
+    # 汚れを描画するための真っ黒なキャンバスを用意
+    mask = Image.new('L', (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    
+    # --- 塊（いびつなシミ）を作る処理 ---
+    for _ in range(num_splatters):
+        # 1. 塊の中心座標を決定
+        cx = random.randint(0, width)
+        cy = random.randint(0, height)
+        
+        # 2. 中心付近に複数の小さな円（飛沫）を重ねて描く
+        num_droplets = random.randint(droplets_per_splatter[0], droplets_per_splatter[1])
+        
+        for _ in range(num_droplets):
+            # 中心から spread の範囲でランダムにずらす
+            ox = cx + random.randint(-spread, spread)
+            oy = cy + random.randint(-spread, spread)
+            radius = random.randint(2, 7) # 飛沫のサイズ
+            
+            # 白(255)で円を描画
+            draw.ellipse((ox - radius, oy - radius, ox + radius, oy + radius), fill=255)
+            
+    # 少しぼかして、円のエッジを無くし「液体」っぽく馴染ませる
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    
+    # --- 元画像と合成（加算） ---
+    img_array = np.array(img, dtype=np.int16)
+    mask_array = np.array(mask, dtype=np.int16)
+    
+    # 白い汚れなので足し算（255を超えないようにクリッピング）
+    result_array = np.clip(img_array + mask_array, 0, 255).astype(np.uint8)
+    
+    return Image.fromarray(result_array, mode='L')
+
+
 from PIL import Image, ImageDraw, ImageFilter, ImageChops
 import random
 import numpy as np
