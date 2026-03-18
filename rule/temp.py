@@ -1,3 +1,107 @@
+from PIL import Image, ImageFilter, ImageEnhance
+import numpy as np
+
+# --------------------------------------------------
+# 1. 平行移動
+# --------------------------------------------------
+def shift_image(img, shift_x=10, shift_y=0):
+    """
+    画像を平行移動させる関数。はみ出た部分は消え、隙間は黒(0)になる。
+    - shift_x: 横方向の移動量（正の数で右、負の数で左）
+    - shift_y: 縦方向の移動量（正の数で下、負の数で上）
+    """
+    # Pillowのtransform(AFFINE)は「移動先の座標から元の座標をどう計算するか」
+    # を指定するため、移動量にはマイナスをつけるのが正解です
+    matrix = (1, 0, -shift_x, 0, 1, -shift_y)
+    return img.transform(img.size, Image.AFFINE, matrix, fillcolor=0)
+
+# --------------------------------------------------
+# 2. ノイズ付加
+# --------------------------------------------------
+def add_noise(img, amount=20):
+    """
+    ランダムな砂嵐ノイズを付加する関数。
+    - amount: ノイズの強さ（例: 20なら -20〜+20 の変動を加える）
+    """
+    # 計算中に255を超えたり0未満になったりしないよう、一度余裕のあるint16型にする
+    img_array = np.array(img, dtype=np.int16)
+    
+    # ランダムなノイズを生成して足し合わせる
+    noise = np.random.randint(-amount, amount + 1, img_array.shape)
+    noisy_array = img_array + noise
+    
+    # 0〜255の範囲に収めて（クリッピング）、8ビット(uint8)に戻す
+    noisy_array = np.clip(noisy_array, 0, 255).astype(np.uint8)
+    
+    return Image.fromarray(noisy_array, mode='L')
+
+# --------------------------------------------------
+# 3. ぼかす
+# --------------------------------------------------
+def blur_image(img, radius=2.0):
+    """
+    ガウスぼかしをかける関数。
+    - radius: ぼかしの強さ（半径）。大きいほどボケる。
+    """
+    return img.filter(ImageFilter.GaussianBlur(radius=radius))
+
+# --------------------------------------------------
+# 4. 輝度UP (明るくする)
+# --------------------------------------------------
+def increase_brightness(img, factor=1.5):
+    """
+    画像を明るくする関数。
+    - factor: 1.0で変化なし、1.0より大きいと明るくなる（例: 1.5で1.5倍）
+    """
+    enhancer = ImageEnhance.Brightness(img)
+    return enhancer.enhance(factor)
+
+# --------------------------------------------------
+# 5. 輝度Down (暗くする)
+# --------------------------------------------------
+def decrease_brightness(img, factor=0.7):
+    """
+    画像を暗くする関数。仕組みはUPと同じ。
+    - factor: 1.0で変化なし、1.0より小さいと暗くなる（例: 0.7で70%の明るさ）
+    """
+    enhancer = ImageEnhance.Brightness(img)
+    return enhancer.enhance(factor)
+
+# --------------------------------------------------
+# 6. コントラスト変更
+# --------------------------------------------------
+def change_contrast(img, factor=1.5):
+    """
+    コントラスト（明暗の差）を変更する関数。
+    - factor: 1.0で変化なし。1.0より大きいと明暗がくっきりし、小さいと眠い画像になる。
+    """
+    enhancer = ImageEnhance.Contrast(img)
+    return enhancer.enhance(factor)
+
+# --------------------------------------------------
+# 7. トーンカーブ変更
+# --------------------------------------------------
+def apply_tone_curve(img, control_points):
+    """
+    折れ線グラフ（トーンカーブ）を指定してピクセル値を変換する関数。
+    - control_points: (入力値, 出力値)のリスト。必ず入力は昇順にすること。
+      例: [(0, 0), (128, 200), (255, 255)] -> 中間調(128)を200に持ち上げるS字カーブ
+    """
+    # 入力のX座標とY座標を分ける
+    x_coords = [p[0] for p in control_points]
+    y_coords = [p[1] for p in control_points]
+    
+    # NumPyの線形補間(interp)を使って、0〜255すべての入力値に対する出力値(LUT)を作る
+    lut = np.interp(range(256), x_coords, y_coords)
+    
+    # 0〜255の整数に丸める
+    lut = np.clip(lut, 0, 255).astype(np.uint8)
+    
+    # Pillowの point() 関数を使って一気に変換（高速）
+    return img.point(lut)
+
+
+
 from PIL import Image
 import math
 import os
